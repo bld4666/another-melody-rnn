@@ -25,6 +25,13 @@ import pandas as pd
 from music21 import *
 from sklearn.model_selection import train_test_split
 from tensorflow import distribute
+import struct
+import base64
+import json
+import site
+
+# print(site.getsitepackages())
+# h()
 
 strategy = distribute.MirroredStrategy(["GPU:0", "GPU:1"])
 
@@ -119,11 +126,10 @@ def noteArrayToStream(note_array):
     return melody_stream
 
 
-wm_mid = converter.parse("./content/musicnet_midis/Beethoven/2313_qt15_1.mid")
-wm_mid.show()
-wm_mel_rnn = streamToNoteArray(wm_mid)
-print(wm_mel_rnn)
-noteArrayToStream(wm_mel_rnn).show()
+# wm_mid = converter.parse("./content/musicnet_midis/Beethoven/2313_qt15_1.mid")
+# wm_mid.show()
+# wm_mel_rnn = streamToNoteArray(wm_mid)
+# noteArrayToStream(wm_mel_rnn).show()
 
 
 # gettinng the note on values from the messages on 50 midi files
@@ -153,7 +159,7 @@ different_labels = set(labels)
 
 model = Sequential()
 
-model.add(LSTM(128, input_shape=(20, 1), unroll=True, return_sequences=True))
+model.add(LSTM(64, input_shape=(20, 1), unroll=True, return_sequences=True, implementation=1))
 model.add(Dropout(0.4))
 # model.add(LSTM(64))
 # model.add(Dense(64, 'relu'))
@@ -175,7 +181,7 @@ labels = np.array(labels)
 # train
 X_train, X_test, y_train, y_test = train_test_split(
     training_data, labels, test_size=0.05, random_state=42)
-model.fit(X_train, y_train, epochs=10, batch_size=32 * strategy.num_replicas_in_sync,
+model.fit(X_train, y_train, epochs=20, batch_size=32 * strategy.num_replicas_in_sync,
           validation_data=(X_test, y_test), callbacks=[early_stop])
 model.save('musicnetgen.h5')
 
@@ -238,5 +244,116 @@ for patterns in tune:
     # increase offset each iteration so that notes do not stack
     offset += 0.5
 
-print(output_melody_stream)
-output_melody_stream.show()
+# write to midi file
+output_melody_stream.write('midi', fp='test_output.mid')
+# print(output_melody_stream)
+
+# print(output_melody_stream)
+# output_melody_stream.show()
+
+
+def get_weights(model):
+    weights = []
+    for layer in model.layers:
+        w = layer.get_weights()
+        print(layer.name)
+        print([g.shape for g in w])
+        weights.append(w)
+    return weights
+
+
+def compressConfig(data):
+    layers = []
+    for layer in data["config"]["layers"]:
+        cfg = layer["config"]
+        if layer["class_name"] == "InputLayer":
+            layer_config = {
+                "batch_input_shape": cfg["batch_input_shape"]
+            }
+        elif layer["class_name"] == "Rescaling":
+            layer_config = {
+                "scale": cfg["scale"],
+                "offset": cfg["offset"]
+            }
+        elif layer["class_name"] == "Dense":
+            layer_config = {
+                "units": cfg["units"],
+                "activation": cfg["activation"]
+            }
+        elif layer["class_name"] == "Conv2D":
+            layer_config = {
+                "filters": cfg["filters"],
+                "kernel_size": cfg["kernel_size"],
+                "strides": cfg["strides"],
+                "activation": cfg["activation"],
+                "padding": cfg["padding"]
+            }
+        elif layer["class_name"] == "MaxPooling2D":
+            layer_config = {
+                "pool_size": cfg["pool_size"],
+                "strides": cfg["strides"],
+                "padding": cfg["padding"]
+            }
+        elif layer["class_name"] == "Embedding":
+            layer_config = {
+                "input_dim": cfg["input_dim"],
+                "output_dim": cfg["output_dim"]
+            }
+        elif layer["class_name"] == "SimpleRNN":
+            layer_config = {
+                "units": cfg["units"],
+                "activation": cfg["activation"]
+            }
+        elif layer["class_name"] == "LSTM":
+            layer_config = {
+                "units": cfg["units"],
+                "activation": cfg["activation"],
+                "recurrent_activation": cfg["recurrent_activation"],
+            }
+        else:
+            layer_config = None
+
+        res_layer = {
+            "class_name": layer["class_name"],
+        }
+        if layer_config is not None:
+            res_layer["config"] = layer_config
+        layers.append(res_layer)
+
+    return {
+        "config": {
+            "layers": layers
+        }
+    }
+
+
+# TODO: parameterize
+def get_model_for_export(model):
+    weight_np = get_weights(model)
+
+    weight_bytes = bytearray()
+    for idx, layer in enumerate(weight_np):
+        # print(layer.shape)
+        # write_to_file(f"model_weight_{idx:02}.txt", str(layer))
+        for weight_group in layer:
+            flatten = weight_group.reshape(-1).tolist()
+            # print("flattened length: ", len(flatten))
+            for i in flatten:
+                weight_bytes.extend(struct.pack("@f", float(i)))
+
+    weight_base64 = base64.b64encode(weight_bytes).decode()
+    config = json.loads(model.to_json())
+    # print("full config: ", config)
+
+    compressed_config = compressConfig(config)
+    # write to file
+    with open("model_config.json", "w") as f:
+        json.dump({
+            "model_name": "musicnetgen",
+            "layers_config": compressed_config,
+            "weight_b64": weight_base64,
+        }, f)
+    return weight_base64, compressed_config
+
+
+get_model_for_export(model)
