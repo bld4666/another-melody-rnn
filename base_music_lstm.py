@@ -30,14 +30,11 @@ import base64
 import json
 import site
 
-# print(site.getsitepackages())
-# h()
-
 strategy = distribute.MirroredStrategy(["GPU:0", "GPU:1"])
 
 
 # visualise the tracks in midi file.
-mid = MidiFile('./content/musicnet_midis/Beethoven/2313_qt15_1.mid')
+# mid = MidiFile('./content/musicnet_midis/Mozart/2313_qt15_1.mid')
 
 # for i in mid.tracks[1]:
 #     print(i)
@@ -126,7 +123,7 @@ def noteArrayToStream(note_array):
     return melody_stream
 
 
-# wm_mid = converter.parse("./content/musicnet_midis/Beethoven/2313_qt15_1.mid")
+# wm_mid = converter.parse("./content/musicnet_midis/Mozart/2313_qt15_1.mid")
 # wm_mid.show()
 # wm_mel_rnn = streamToNoteArray(wm_mid)
 # noteArrayToStream(wm_mel_rnn).show()
@@ -135,9 +132,9 @@ def noteArrayToStream(note_array):
 # gettinng the note on values from the messages on 50 midi files
 note_on = []
 n = 50
-for m in range(n):
-    mid = MidiFile('./content/musicnet_midis/Beethoven/' +
-                   os.listdir('./content/musicnet_midis/Beethoven')[m])
+filenames = os.listdir('./content/musicnet_midis/Mozart')
+for filename in filenames:
+    mid = MidiFile('./content/musicnet_midis/Mozart/' + filename)
     for j in range(len(mid.tracks)):
         for i in mid.tracks[j]:
             if str(type(i)) != "<class 'mido.midifiles.meta.MetaMessage'>":
@@ -145,12 +142,12 @@ for m in range(n):
                 if x[0] == 'note_on':
                     note_on.append(int(x[2].split('=')[1]))
 
-
+inputlen = 20
 # making data to train
 training_data = []
 labels = []
-for i in range(20, len(note_on)):
-    training_data.append(note_on[i-20:i])
+for i in range(inputlen, len(note_on)):
+    training_data.append(note_on[i-inputlen:i])
     labels.append(note_on[i])
 
 
@@ -159,7 +156,8 @@ different_labels = set(labels)
 
 model = Sequential()
 
-model.add(LSTM(64, input_shape=(20, 1), unroll=True, return_sequences=True, implementation=1))
+model.add(LSTM(64, input_shape=(inputlen, 1), unroll=True,
+          return_sequences=True, implementation=1))
 model.add(Dropout(0.4))
 # model.add(LSTM(64))
 # model.add(Dense(64, 'relu'))
@@ -181,7 +179,7 @@ labels = np.array(labels)
 # train
 X_train, X_test, y_train, y_test = train_test_split(
     training_data, labels, test_size=0.05, random_state=42)
-model.fit(X_train, y_train, epochs=20, batch_size=32 * strategy.num_replicas_in_sync,
+model.fit(X_train, y_train, epochs=200, batch_size=32 * strategy.num_replicas_in_sync,
           validation_data=(X_test, y_test), callbacks=[early_stop])
 model.save('musicnetgen.h5')
 
@@ -190,14 +188,17 @@ model.save('musicnetgen.h5')
 
 # prediction
 
-n = 100
+n = 10
 # randomize the starter notes
 index = np.random.choice(len(training_data))
 starter_notes = training_data[index]
-x = starter_notes.reshape(1, 20, 1)
+x = starter_notes.reshape(1, inputlen, 1)
+# print("starter notes: ", starter_notes)
 tune = list(starter_notes.reshape(-1,))
 for i in range(n):
-    pred = int(model.predict(x)[0][0])
+    out = model.predict(x)
+    # print("output shape: ", out.shape)
+    pred = int(out[0][0])
     if round(pred) == round(tune[-1]):
         p = np.random.choice(['a', 'b', 'c'])
         if p == 'a':
@@ -207,9 +208,9 @@ for i in range(n):
         else:
             pred = 70
     tune.append(pred)
-    x = tune[-20:]
+    x = tune[-inputlen:]
     x = np.array(x)
-    x = x.reshape(1, 20, 1)
+    x = x.reshape(1, inputlen, 1)
 
 tune = list(np.array(tune).astype('float32'))
 
