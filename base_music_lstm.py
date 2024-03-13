@@ -4,8 +4,9 @@ from keras.models import Sequential
 from keras.layers import Dense
 from keras.layers import Dropout
 from keras.layers import LSTM
+from keras.layers import Embedding
 from keras.callbacks import ModelCheckpoint, EarlyStopping
-from keras.utils import np_utils
+from keras.utils import np_utils, to_categorical
 from keras.models import load_model
 import os
 from tqdm import *
@@ -34,7 +35,7 @@ strategy = distribute.MirroredStrategy(["GPU:0", "GPU:1"])
 
 
 # visualise the tracks in midi file.
-# mid = MidiFile('./content/musicnet_midis/Mozart/2313_qt15_1.mid')
+# mid = MidiFile('./content/musicnet_midis/Dvorak/2313_qt15_1.mid')
 
 # for i in mid.tracks[1]:
 #     print(i)
@@ -50,6 +51,7 @@ MELODY_NOTE_OFF = 128  # (stop playing all previous notes)
 MELODY_NO_EVENT = 129  # (no change from previous event)
 # Each element in the sequence lasts for one sixteenth note.
 # This can encode monophonic music only.
+VOCAB_SIZE = 130
 
 
 def streamToNoteArray(stream):
@@ -123,7 +125,7 @@ def noteArrayToStream(note_array):
     return melody_stream
 
 
-# wm_mid = converter.parse("./content/musicnet_midis/Mozart/2313_qt15_1.mid")
+# wm_mid = converter.parse("./content/musicnet_midis/Dvorak/2313_qt15_1.mid")
 # wm_mid.show()
 # wm_mel_rnn = streamToNoteArray(wm_mid)
 # noteArrayToStream(wm_mel_rnn).show()
@@ -132,9 +134,9 @@ def noteArrayToStream(note_array):
 # gettinng the note on values from the messages on 50 midi files
 note_on = []
 n = 50
-filenames = os.listdir('./content/musicnet_midis/Mozart')
+filenames = os.listdir('./content/musicnet_midis/Dvorak')
 for filename in filenames:
-    mid = MidiFile('./content/musicnet_midis/Mozart/' + filename)
+    mid = MidiFile('./content/musicnet_midis/Dvorak/' + filename)
     for j in range(len(mid.tracks)):
         for i in mid.tracks[j]:
             if str(type(i)) != "<class 'mido.midifiles.meta.MetaMessage'>":
@@ -146,23 +148,27 @@ inputlen = 20
 # making data to train
 training_data = []
 labels = []
+
 for i in range(inputlen, len(note_on)):
-    training_data.append(note_on[i-inputlen:i])
-    labels.append(note_on[i])
+    inputs = note_on[i-inputlen:i]
+    # inputs = to_categorical(inputs, num_classes=VOCAB_SIZE)
+    training_data.append(inputs)
+    targets = [note_on[i]]
+    targets = to_categorical(targets, num_classes=VOCAB_SIZE)
+    labels.append(targets)
 
 
-different_labels = set(labels)
+# different_labels = set(labels)
 
 
 model = Sequential()
-
 model.add(LSTM(64, input_shape=(inputlen, 1), unroll=True,
           return_sequences=True, implementation=1))
 model.add(Dropout(0.4))
-# model.add(LSTM(64))
-# model.add(Dense(64, 'relu'))
+# model.add(LSTM(32, return_sequences=True, implementation=1))
+# model.add(Dense(32, 'relu'))
 # model.add(Dropout(0.2))
-model.add(Dense(1, 'relu'))
+model.add(Dense(VOCAB_SIZE, 'softmax'))
 
 model.compile(loss='MSE', optimizer='adam')
 model.summary()
@@ -179,40 +185,65 @@ labels = np.array(labels)
 # train
 X_train, X_test, y_train, y_test = train_test_split(
     training_data, labels, test_size=0.05, random_state=42)
-model.fit(X_train, y_train, epochs=200, batch_size=32 * strategy.num_replicas_in_sync,
+print(y_train.shape)
+model.fit(X_train, y_train, epochs=20, batch_size=32 * strategy.num_replicas_in_sync,
           validation_data=(X_test, y_test), callbacks=[early_stop])
 model.save('musicnetgen.h5')
 
 # or load trained model
 # model = load_model('musicnetgen.h5')
 
-# prediction
 
-n = 10
+# prediction
+def _sample_with_temperature(probabilites, temperature):
+    """Samples an index from a probability array reapplying softmax using temperature
+
+    :param predictions (nd.array): Array containing probabilities for each of the possible outputs.
+    :param temperature (float): Float in interval [0, 1]. Numbers closer to 0 make the model more deterministic.
+        A number closer to 1 makes the generation more unpredictable.
+
+    :return index (int): Selected output symbol
+    """
+    predictions = np.log(probabilites) / temperature
+    probabilites = np.exp(predictions) / np.sum(np.exp(predictions))
+
+    choices = range(len(probabilites))
+    index = np.random.choice(choices, p=probabilites)
+
+    return index
+
+n = 100
 # randomize the starter notes
 index = np.random.choice(len(training_data))
 starter_notes = training_data[index]
 x = starter_notes.reshape(1, inputlen, 1)
-# print("starter notes: ", starter_notes)
+# print("starter: ", x.shape)
 tune = list(starter_notes.reshape(-1,))
 for i in range(n):
-    out = model.predict(x)
+    out = model.predict(x)[:, 0:1, :]
     # print("output shape: ", out.shape)
-    pred = int(out[0][0])
-    if round(pred) == round(tune[-1]):
-        p = np.random.choice(['a', 'b', 'c'])
-        if p == 'a':
-            pred = 65
-        elif p == 'b':
-            pred = 60
-        else:
-            pred = 70
+    # pred = int(out[0][out.shape[1]-1][0])
+    next_note = out[0][0]
+    pred = _sample_with_temperature(next_note, 0.5)
+    # if round(pred) == round(tune[-1]):
+    #     p = np.random.choice(['a', 'b', 'c'])
+    #     if p == 'a':
+    #         pred = 65
+    #     elif p == 'b':
+    #         pred = 60
+    #     else:
+    #         pred = 70
     tune.append(pred)
-    x = tune[-inputlen:]
-    x = np.array(x)
-    x = x.reshape(1, inputlen, 1)
+    # add out to x
+    vec = np.zeros((1, 1, 1))
+    vec[0][0][0] = pred
+    x = np.append(x, vec, axis=1)
+    x = x[:, -inputlen:, :]
+    # print("x shape: ", x.shape)
+    # x = x.reshape(1, inputlen, VOCAB_SIZE)
 
 tune = list(np.array(tune).astype('float32'))
+print("generated melody", tune)
 
 # encoder
 
@@ -250,7 +281,7 @@ output_melody_stream.write('midi', fp='test_output.mid')
 # print(output_melody_stream)
 
 # print(output_melody_stream)
-# output_melody_stream.show()
+output_melody_stream.show()
 
 
 def get_weights(model):

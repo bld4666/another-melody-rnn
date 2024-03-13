@@ -5,7 +5,7 @@ from keras.layers import Dense
 from keras.layers import Dropout
 from keras.layers import LSTM
 from keras.callbacks import ModelCheckpoint, EarlyStopping
-from keras.utils import np_utils
+from keras.utils import np_utils, to_categorical
 from keras.models import load_model
 import os
 from tqdm import *
@@ -30,7 +30,7 @@ MELODY_NOTE_OFF = 128  # (stop playing all previous notes)
 MELODY_NO_EVENT = 129  # (no change from previous event)
 # Each element in the sequence lasts for one sixteenth note.
 # This can encode monophonic music only.
-
+VOCAB_SIZE = 130
 
 def streamToNoteArray(stream):
     """
@@ -109,30 +109,37 @@ def train(dirname, num_units=128, num_epochs=20, loss='MSE', optimizer='adam', e
     early_stop = early_stop == 'True'
     note_on = []
     filenames = os.listdir(dirname)
-    for filename in filenames:
-        mid = MidiFile(dirname + "/" + filename)
-        for j in range(len(mid.tracks)):
-            for i in mid.tracks[j]:
-                if str(type(i)) != "<class 'mido.midifiles.meta.MetaMessage'>":
-                    x = str(i).split(' ')
-                    if x[0] == 'note_on':
-                        note_on.append(int(x[2].split('=')[1]))
+    for currentpath, folders, files in os.walk(dirname):
+        for file in files:
+            mid = MidiFile(os.path.join(currentpath, file))
+            for j in range(len(mid.tracks)):
+                for i in mid.tracks[j]:
+                    if str(type(i)) != "<class 'mido.midifiles.meta.MetaMessage'>":
+                        x = str(i).split(' ')
+                        if x[0] == 'note_on':
+                            note_on.append(int(x[2].split('=')[1]))
 
     # making data to train
     inputlen = 20
     training_data = []
     labels = []
     for i in range(inputlen, len(note_on)):
-        training_data.append(note_on[i-inputlen:i])
-        labels.append(note_on[i])
+        inputs = note_on[i-inputlen:i]
+        # inputs = to_categorical(inputs, num_classes=VOCAB_SIZE)
+        training_data.append(inputs)
+        targets = [note_on[i]]
+        targets = to_categorical(targets, num_classes=VOCAB_SIZE)
+        labels.append(targets)
 
-    different_labels = set(labels)
     model = Sequential()
 
     model.add(LSTM(num_units, input_shape=(inputlen, 1), unroll=True,
-                   return_sequences=True, implementation=1))
+              return_sequences=True, implementation=1))
     model.add(Dropout(0.4))
-    model.add(Dense(1, 'relu'))
+    # model.add(LSTM(num_units // 2, return_sequences=True, implementation=1))
+    # model.add(Dense(num_units // 2, 'relu'))
+    # model.add(Dropout(0.2))
+    model.add(Dense(VOCAB_SIZE, 'softmax'))
 
     model.compile(loss='MSE', optimizer='adam')
     model.summary()
